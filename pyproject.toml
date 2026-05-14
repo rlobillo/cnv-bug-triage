@@ -1,0 +1,30 @@
+[project]
+name = "cnv-bug-triage"
+version = "0.1.0"
+description = "LLM-assisted bug triage agent for CNV Jira — suggests priority, assignee, QA contact, sprint, fixVersion, and backport analysis"
+requires-python = ">=3.11"
+dependencies = [
+    "jira>=3.8",
+    "litellm>=1.40",
+    "openpyxl>=3.1.5",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+]
+
+[project.scripts]
+cnv-bug-triage = "cnv_bug_triage.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/cnv_bug_triage"]
+artifacts = ["config.yaml"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

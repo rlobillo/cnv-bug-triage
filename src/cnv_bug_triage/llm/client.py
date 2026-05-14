@@ -1,0 +1,103 @@
+"""Thin litellm wrapper for LLM completion calls."""
+
+from __future__ import annotations
+
+import json
+import logging
+import time
+from typing import Any
+
+logger = logging.getLogger(__name__)
+
+_MAX_RETRIES = 3
+_INITIAL_BACKOFF_S = 2.0
+_DEFAULT_TIMEOUT_S = 600
+
+
+class LLMError(RuntimeError):
+    """Raised when the LLM call fails after all retries."""
+
+
+def complete(
+    model: str,
+    messages: list[dict[str, str]],
+    response_format: dict[str, Any] | None = None,
+    temperature: float = 0.0,
+    timeout: int = _DEFAULT_TIMEOUT_S,
+) -> str:
+    try:
+        import litellm
+    except ImportError:
+        raise ImportError(
+            "litellm is required. Install it with: pip install litellm"
+        )
+
+    kwargs: dict[str, Any] = {
+        "model": model,
+        "messages": messages,
+        "temperature": temperature,
+        "timeout": timeout,
+    }
+    if response_format:
+        kwargs["response_format"] = response_format
+
+    last_err: Exception | None = None
+    for attempt in range(_MAX_RETRIES):
+        try:
+            response = litellm.completion(**kwargs)
+            usage = getattr(response, "usage", None)
+            if usage:
+                logger.info(
+                    "LLM usage: model=%s prompt=%d completion=%d total=%d",
+                    model,
+                    getattr(usage, "prompt_tokens", 0),
+                    getattr(usage, "completion_tokens", 0),
+                    getattr(usage, "total_tokens", 0),
+                )
+            content = response.choices[0].message.content or ""
+            if not content.strip():
+                raise LLMError("LLM returned empty response")
+            return content
+        except LLMError:
+            raise
+        except Exception as exc:
+            last_err = exc
+            if attempt < _MAX_RETRIES - 1:
+                delay = _INITIAL_BACKOFF_S * (2 ** attempt)
+                logger.warning(
+                    "LLM call failed (attempt %d/%d), retrying in %.1fs: %s",
+                    attempt + 1, _MAX_RETRIES, delay, exc,
+                )
+                time.sleep(delay)
+            else:
+                logger.error(
+                    "LLM call failed after %d attempts: %s",
+                    _MAX_RETRIES, exc,
+                )
+
+    raise LLMError(
+        f"LLM call failed after {_MAX_RETRIES} attempts: {last_err}"
+    )
+
+
+def parse_json_response(text: str) -> dict[str, Any]:
+    cleaned = text.strip()
+    if cleaned.startswith("```"):
+        lines = cleaned.split("\n")
+        end = len(lines) - 1
+        if lines[-1].strip() == "```":
+            end = len(lines) - 1
+        cleaned = "\n".join(lines[1:end])
+
+    try:
+        return json.loads(cleaned)
+    except json.JSONDecodeError:
+        logger.warning(
+            "Failed to parse LLM response as JSON, "
+            "attempting to find JSON object in response"
+        )
+        brace_start = text.find("{")
+        brace_end = text.rfind("}") + 1
+        if brace_start >= 0 and brace_end > brace_start:
+            return json.loads(text[brace_start:brace_end])
+        raise
