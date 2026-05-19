@@ -2,16 +2,19 @@
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
+from unittest.mock import patch
 
-import pytest
 import yaml
 
 from cnv_bug_triage.schemas.config import TeamMember
 from cnv_bug_triage.team.discovery import (
     TeamCache,
+    _build_areas_prompt,
+    _build_areas_with_llm,
+    _PersonAccum,
     build_discovery_jql,
-    extract_keywords,
     extract_team_from_issues,
     format_team_report,
     load_team_cache,
@@ -51,6 +54,15 @@ def _make_issue(
     return SimpleNamespace(key=key, fields=SimpleNamespace(**fields_dict))
 
 
+def _mock_llm_areas(areas: list[str]):
+    """Return a patch that makes complete() return a JSON areas response."""
+    response = json.dumps({"areas": areas})
+    return patch(
+        "cnv_bug_triage.team.discovery.complete",
+        return_value=response,
+    )
+
+
 # ── build_discovery_jql ──────────────────────────────────────────
 
 
@@ -88,62 +100,108 @@ class TestBuildDiscoveryJql:
         assert "resolved >= -180d" in jql
 
 
-# ── extract_keywords ─────────────────────────────────────────────
+# ── _build_areas_prompt ──────────────────────────────────────────
 
 
-class TestExtractKeywords:
-    def test_frequent_words_returned(self):
-        summaries = [
-            "VM migration fails during upgrade",
-            "Live migration broken after upgrade",
-            "Migration timeout on upgrade path",
-        ]
-        keywords = extract_keywords(summaries, min_freq=2)
-        assert "migration" in keywords
-        assert "upgrade" in keywords
+class TestBuildAreasPrompt:
+    def test_contains_person_info(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=5)
+        person.summaries = ["HCO upgrade fails", "HCO webhook broken"]
+        person.components = ["HCO"]
+        person.labels = ["upgrade"]
+        prompt = _build_areas_prompt(person)
+        assert "Alice" in prompt
+        assert "dev" in prompt
+        assert "5" in prompt
 
-    def test_stop_words_filtered(self):
-        summaries = [
-            "Bug in the test with error",
-            "Bug in the test with error again",
-            "Bug in the test with error once more",
-        ]
-        keywords = extract_keywords(summaries, min_freq=2)
-        assert "bug" not in keywords
-        assert "the" not in keywords
-        assert "error" not in keywords
-        assert "test" not in keywords
+    def test_contains_summaries(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=2)
+        person.summaries = ["VM migration timeout", "Live migration error"]
+        prompt = _build_areas_prompt(person)
+        assert "VM migration timeout" in prompt
+        assert "Live migration error" in prompt
 
-    def test_min_frequency_threshold(self):
-        summaries = [
-            "migration fails",
-            "storage broken",
-            "network down",
-        ]
-        keywords = extract_keywords(summaries, min_freq=2)
-        assert keywords == []
+    def test_contains_components_and_labels(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=2)
+        person.components = ["HCO", "CDI"]
+        person.labels = ["upgrade", "lifecycle"]
+        person.summaries = ["test"]
+        prompt = _build_areas_prompt(person)
+        assert "CDI" in prompt
+        assert "HCO" in prompt
+        assert "upgrade" in prompt
 
-    def test_max_results_capped(self):
-        summaries = [f"word{i} appears here" for i in range(20)] * 3
-        keywords = extract_keywords(summaries, min_freq=2, top_n=5)
-        assert len(keywords) <= 5
+    def test_both_role(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=3, qa_count=2)
+        person.summaries = ["test"]
+        prompt = _build_areas_prompt(person)
+        assert "both" in prompt
 
-    def test_empty_summaries(self):
-        assert extract_keywords([]) == []
-        assert extract_keywords(["", ""]) == []
+    def test_qe_role(self):
+        person = _PersonAccum("id-1", "Alice", qa_count=3)
+        person.summaries = ["test"]
+        prompt = _build_areas_prompt(person)
+        assert "qe" in prompt
 
-    def test_dedup_per_summary(self):
-        summaries = [
-            "migration migration migration migration",
-        ]
-        keywords = extract_keywords(summaries, min_freq=1)
-        assert "migration" in keywords
+    def test_summaries_capped(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=50)
+        person.summaries = [f"Bug number {i}" for i in range(60)]
+        prompt = _build_areas_prompt(person)
+        assert "Bug number 39" in prompt
+        assert "Bug number 40" not in prompt
 
-    def test_short_tokens_excluded(self):
-        summaries = ["VM is up", "VM is up", "VM is up"]
-        keywords = extract_keywords(summaries, min_freq=2)
-        assert "is" not in keywords
-        assert "up" not in keywords
+    def test_deduplicates_summaries(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=4)
+        person.summaries = ["Same bug"] * 4
+        prompt = _build_areas_prompt(person)
+        assert prompt.count("Same bug") == 1
+
+    def test_requests_json_format(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=2)
+        person.summaries = ["test"]
+        prompt = _build_areas_prompt(person)
+        assert '"areas"' in prompt
+        assert "JSON" in prompt
+
+
+# ── _build_areas_with_llm ───────────────────────────────────────
+
+
+class TestBuildAreasWithLlm:
+    def test_returns_llm_areas(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=3)
+        person.summaries = ["HCO upgrade", "HCO webhook", "CDI import"]
+        with _mock_llm_areas(["HCO lifecycle", "CDI import"]):
+            areas = _build_areas_with_llm(person, "gpt-4o", 0.0)
+        assert areas == ["HCO lifecycle", "CDI import"]
+
+    def test_caps_at_8_areas(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=2)
+        person.summaries = ["test"]
+        long_list = [f"area-{i}" for i in range(15)]
+        with _mock_llm_areas(long_list):
+            areas = _build_areas_with_llm(person, "gpt-4o", 0.0)
+        assert len(areas) <= 8
+
+    def test_llm_failure_returns_empty(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=2)
+        person.summaries = ["test"]
+        with patch(
+            "cnv_bug_triage.team.discovery.complete",
+            side_effect=Exception("LLM down"),
+        ):
+            areas = _build_areas_with_llm(person, "gpt-4o", 0.0)
+        assert areas == []
+
+    def test_non_list_response_returns_empty(self):
+        person = _PersonAccum("id-1", "Alice", assigned_count=2)
+        person.summaries = ["test"]
+        with patch(
+            "cnv_bug_triage.team.discovery.complete",
+            return_value='{"areas": "not a list"}',
+        ):
+            areas = _build_areas_with_llm(person, "gpt-4o", 0.0)
+        assert areas == []
 
 
 # ── extract_team_from_issues ─────────────────────────────────────
@@ -155,7 +213,8 @@ class TestExtractTeamFromIssues:
             _make_issue(assignee_id="dev-1", assignee_name="Alice"),
             _make_issue(assignee_id="dev-1", assignee_name="Alice"),
         ]
-        members = extract_team_from_issues(issues, sample_cfg)
+        with _mock_llm_areas(["testing"]):
+            members = extract_team_from_issues(issues, sample_cfg, model="gpt-4o")
         alice = next(m for m in members if m.account_id == "dev-1")
         assert alice.role == "dev"
 
@@ -164,7 +223,8 @@ class TestExtractTeamFromIssues:
             _make_issue(qa_contact_id="qe-1", qa_contact_name="Bob"),
             _make_issue(qa_contact_id="qe-1", qa_contact_name="Bob"),
         ]
-        members = extract_team_from_issues(issues, sample_cfg)
+        with _mock_llm_areas(["testing"]):
+            members = extract_team_from_issues(issues, sample_cfg, model="gpt-4o")
         bob = next(m for m in members if m.account_id == "qe-1")
         assert bob.role == "qe"
 
@@ -178,7 +238,8 @@ class TestExtractTeamFromIssues:
                 assignee_id="both-1", assignee_name="Carol",
             ),
         ]
-        members = extract_team_from_issues(issues, sample_cfg)
+        with _mock_llm_areas(["testing"]):
+            members = extract_team_from_issues(issues, sample_cfg, model="gpt-4o")
         carol = next(m for m in members if m.account_id == "both-1")
         assert carol.role == "both"
 
@@ -186,38 +247,27 @@ class TestExtractTeamFromIssues:
         issues = [
             _make_issue(assignee_id="one-timer", assignee_name="Ghost"),
         ]
-        members = extract_team_from_issues(issues, sample_cfg)
+        with _mock_llm_areas(["testing"]):
+            members = extract_team_from_issues(issues, sample_cfg, model="gpt-4o")
         assert not any(m.account_id == "one-timer" for m in members)
 
-    def test_components_in_areas(self, sample_cfg):
+    def test_llm_areas_used(self, sample_cfg):
         issues = [
             _make_issue(
                 assignee_id="dev-1", assignee_name="Alice",
+                summary="HCO upgrade fails",
                 components=["HCO"],
             ),
             _make_issue(
                 assignee_id="dev-1", assignee_name="Alice",
-                components=["HCO", "CDI"],
+                summary="HCO webhook broken",
             ),
         ]
-        members = extract_team_from_issues(issues, sample_cfg)
+        with _mock_llm_areas(["HCO lifecycle", "upgrade reconciliation"]):
+            members = extract_team_from_issues(issues, sample_cfg, model="gpt-4o")
         alice = next(m for m in members if m.account_id == "dev-1")
-        assert "hco" in alice.areas
-
-    def test_labels_in_areas(self, sample_cfg):
-        issues = [
-            _make_issue(
-                assignee_id="dev-1", assignee_name="Alice",
-                labels=["upgrade", "upgrade", "install"],
-            ),
-            _make_issue(
-                assignee_id="dev-1", assignee_name="Alice",
-                labels=["upgrade"],
-            ),
-        ]
-        members = extract_team_from_issues(issues, sample_cfg)
-        alice = next(m for m in members if m.account_id == "dev-1")
-        assert "upgrade" in alice.areas
+        assert "HCO lifecycle" in alice.areas
+        assert "upgrade reconciliation" in alice.areas
 
     def test_sorted_by_name(self, sample_cfg):
         issues = [
@@ -226,16 +276,17 @@ class TestExtractTeamFromIssues:
             _make_issue(assignee_id="a-1", assignee_name="Anna"),
             _make_issue(assignee_id="a-1", assignee_name="Anna"),
         ]
-        members = extract_team_from_issues(issues, sample_cfg)
+        with _mock_llm_areas(["testing"]):
+            members = extract_team_from_issues(issues, sample_cfg, model="gpt-4o")
         names = [m.name for m in members]
         assert names == sorted(names)
 
     def test_empty_issues(self, sample_cfg):
-        assert extract_team_from_issues([], sample_cfg) == []
+        assert extract_team_from_issues([], sample_cfg, model="gpt-4o") == []
 
     def test_no_assignee_or_qa(self, sample_cfg):
         issues = [_make_issue(), _make_issue()]
-        assert extract_team_from_issues(issues, sample_cfg) == []
+        assert extract_team_from_issues(issues, sample_cfg, model="gpt-4o") == []
 
 
 # ── TeamCache ────────────────────────────────────────────────────

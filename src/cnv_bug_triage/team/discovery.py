@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import logging
-import re
-from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -14,6 +12,7 @@ import yaml
 
 from cnv_bug_triage.jira.client import _escape_jql, search_all
 from cnv_bug_triage.jira.fields import parse_user_field
+from cnv_bug_triage.llm.client import LLMError, complete, parse_json_response
 from cnv_bug_triage.schemas.config import AppConfig, TeamMember
 
 logger = logging.getLogger(__name__)
@@ -21,27 +20,7 @@ logger = logging.getLogger(__name__)
 DEFAULT_LOOKBACK_DAYS = 180
 DEFAULT_CACHE_PATH = ".team_cache.yaml"
 MIN_BUG_COUNT = 2
-TOP_AREAS = 8
-MIN_KEYWORD_FREQ = 3
-
-STOP_WORDS: frozenset[str] = frozenset({
-    "the", "and", "for", "with", "from", "this", "that", "are", "was",
-    "were", "been", "being", "have", "has", "had", "not", "but", "can",
-    "could", "should", "would", "will", "shall", "may", "might",
-    "does", "did", "doing", "done", "its", "into", "over", "such",
-    "than", "too", "very", "just", "about", "also", "after", "before",
-    "between", "each", "other", "some", "only", "when", "where", "which",
-    "while", "during", "through", "then", "there", "here", "all", "any",
-    "both", "more", "most", "same", "own",
-    "bug", "issue", "error", "fix", "test", "tests", "testing", "fails",
-    "failed", "failure", "failing", "broken", "break", "breaks",
-    "cnv", "openshift", "virtualization",
-    "need", "needs", "needed",
-    "version", "release", "update", "updated", "updates",
-    "please", "check", "see", "using", "used", "use",
-})
-
-_TOKEN_RE = re.compile(r"[a-zA-Z][a-zA-Z0-9_-]{2,}")
+MAX_SUMMARIES_PER_PERSON = 40
 
 
 @dataclass
@@ -110,52 +89,86 @@ def build_discovery_jql(cfg: AppConfig, days: int = DEFAULT_LOOKBACK_DAYS) -> st
     return jql
 
 
-def extract_keywords(
-    summaries: list[str],
-    min_freq: int = MIN_KEYWORD_FREQ,
-    top_n: int = TOP_AREAS,
+def _build_areas_prompt(person: _PersonAccum) -> str:
+    role = "dev"
+    if person.assigned_count > 0 and person.qa_count > 0:
+        role = "both (dev + QE)"
+    elif person.qa_count > 0:
+        role = "qe"
+
+    total = person.assigned_count + person.qa_count
+
+    unique_components = sorted(set(person.components))
+    unique_labels = sorted(set(person.labels))
+    unique_summaries = list(dict.fromkeys(person.summaries))
+    sample = unique_summaries[:MAX_SUMMARIES_PER_PERSON]
+
+    lines = [
+        "You are analyzing a team member's bug history to determine "
+        "their areas of expertise.",
+        "",
+        f"Person: {person.name}",
+        f"Role: {role}",
+        f"Bugs worked on: {total}",
+        "",
+    ]
+
+    if unique_components:
+        lines.append(
+            f"Components they worked on: {', '.join(unique_components)}"
+        )
+    if unique_labels:
+        lines.append(f"Labels from their bugs: {', '.join(unique_labels)}")
+
+    lines.append("")
+    lines.append("Bug summaries (sample):")
+    for s in sample:
+        lines.append(f"- {s}")
+
+    lines.append("")
+    lines.append(
+        'Return a JSON object with a single key "areas" containing '
+        "a list of 3-8 concise expertise area strings. Each area "
+        "should be 1-3 words, specific to the domain (e.g. "
+        '"live migration", "HCO lifecycle", "storage import", '
+        '"SRIOV networking"). Group related bugs into coherent areas '
+        "rather than listing individual keywords."
+    )
+
+    return "\n".join(lines)
+
+
+def _build_areas_with_llm(
+    person: _PersonAccum,
+    model: str,
+    temperature: float,
 ) -> list[str]:
-    counts: Counter[str] = Counter()
-    for summary in summaries:
-        tokens = _TOKEN_RE.findall(summary)
-        unique_tokens = {t.lower() for t in tokens} - STOP_WORDS
-        counts.update(unique_tokens)
-
-    filtered = {k: v for k, v in counts.items() if v >= min_freq}
-    ranked = sorted(filtered.items(), key=lambda x: (-x[1], x[0]))
-    return [word for word, _ in ranked[:top_n]]
-
-
-def _build_areas(person: _PersonAccum) -> list[str]:
-    area_set: set[str] = set()
-    areas: list[str] = []
-
-    comp_counts = Counter(c.lower() for c in person.components)
-    for comp, _ in comp_counts.most_common():
-        if comp not in area_set:
-            areas.append(comp)
-            area_set.add(comp)
-
-    label_counts = Counter(la.lower() for la in person.labels)
-    for label, count in label_counts.most_common():
-        if count >= 2 and label not in area_set and label not in STOP_WORDS:
-            areas.append(label)
-            area_set.add(label)
-
-    keywords = extract_keywords(person.summaries)
-    for kw in keywords:
-        if kw not in area_set:
-            areas.append(kw)
-            area_set.add(kw)
-        if len(areas) >= TOP_AREAS:
-            break
-
-    return areas[:TOP_AREAS]
+    prompt = _build_areas_prompt(person)
+    try:
+        raw = complete(
+            model=model,
+            messages=[{"role": "user", "content": prompt}],
+            temperature=temperature,
+        )
+        data = parse_json_response(raw)
+        areas = data.get("areas", [])
+        if isinstance(areas, list):
+            return [str(a) for a in areas[:8]]
+        logger.warning("LLM returned non-list areas for %s", person.name)
+        return []
+    except (LLMError, Exception):
+        logger.warning(
+            "LLM area extraction failed for %s, using empty areas",
+            person.name, exc_info=True,
+        )
+        return []
 
 
 def extract_team_from_issues(
     issues: list[Any],
     cfg: AppConfig,
+    model: str = "",
+    temperature: float = 0.0,
 ) -> list[TeamMember]:
     people: dict[str, _PersonAccum] = {}
 
@@ -215,11 +228,14 @@ def extract_team_from_issues(
         else:
             role = "dev"
 
+        logger.info("Profiling %s (%s) with LLM...", person.name, role)
+        areas = _build_areas_with_llm(person, model, temperature)
+
         members.append(TeamMember(
             account_id=person.account_id,
             name=person.name,
             role=role,
-            areas=_build_areas(person),
+            areas=areas,
         ))
 
     members.sort(key=lambda m: m.name)
@@ -275,6 +291,8 @@ def discover_team(
     *,
     days: int = DEFAULT_LOOKBACK_DAYS,
     cache_path: str = DEFAULT_CACHE_PATH,
+    model: str = "",
+    temperature: float = 0.0,
 ) -> TeamCache:
     jql = build_discovery_jql(cfg, days=days)
     logger.info("Discovery JQL: %s", jql)
@@ -282,7 +300,9 @@ def discover_team(
     issues = search_all(client, jql)
     logger.info("Found %d resolved bugs for team discovery", len(issues))
 
-    members = extract_team_from_issues(issues, cfg)
+    members = extract_team_from_issues(
+        issues, cfg, model=model, temperature=temperature,
+    )
     logger.info("Discovered %d team members", len(members))
 
     cache = TeamCache(

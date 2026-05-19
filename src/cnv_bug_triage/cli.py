@@ -105,16 +105,21 @@ def main(argv: list[str] | None = None) -> None:
         print(f"Config error: {exc}", file=sys.stderr)
         sys.exit(1)
 
+    model = args.model or os.environ.get("LLM_MODEL") or cfg.llm.default_model
+
     if args.discover_team:
         from cnv_bug_triage.jira.client import get_jira_client
         from cnv_bug_triage.team.discovery import discover_team, format_team_report
 
         client = get_jira_client(cfg)
-        cache = discover_team(client, cfg, days=args.discovery_days)
+        cache = discover_team(
+            client, cfg,
+            days=args.discovery_days,
+            model=model,
+            temperature=cfg.llm.temperature,
+        )
         print(format_team_report(cache))
         return
-
-    model = args.model or os.environ.get("LLM_MODEL") or cfg.llm.default_model
 
     result = run_triage(
         cfg,
