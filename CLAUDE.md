@@ -21,7 +21,7 @@ cnv-bug-triage is an LLM-assisted CLI tool that triages CNV (OpenShift Virtualiz
 ## Required Environment Variables
 
 - `JIRA_TOKEN` — Jira API token (required)
-- `JIRA_EMAIL` — Jira email for Cloud basic auth (optional, uses bearer token if omitted)
+- `JIRA_EMAIL` — Atlassian account email (required)
 - `JIRA_URL` — override Jira URL (optional, defaults to config.yaml)
 - `LLM_MODEL` — override LLM model (optional)
 - LLM provider keys: `OPENAI_API_KEY`, `ANTHROPIC_API_KEY`, etc. (depends on model chosen)

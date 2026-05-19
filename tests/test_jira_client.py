@@ -62,22 +62,18 @@ class TestGetJiraClient:
             basic_auth=("a@b.c", "tok"),
         )
 
-    @patch("cnv_bug_triage.jira.client.JIRA")
-    def test_token_auth_without_email(self, mock_jira, sample_cfg):
+    def test_missing_email_raises(self, sample_cfg):
         with patch.dict("os.environ", {"JIRA_TOKEN": "tok"}, clear=True):
-            get_jira_client(sample_cfg)
-        mock_jira.assert_called_once_with(
-            server=sample_cfg.jira.url,
-            token_auth="tok",
-        )
+            with pytest.raises(RuntimeError, match="JIRA_EMAIL"):
+                get_jira_client(sample_cfg)
 
     @patch("cnv_bug_triage.jira.client.JIRA")
     def test_url_env_override(self, mock_jira, sample_cfg):
-        with patch.dict("os.environ", {"JIRA_TOKEN": "tok", "JIRA_URL": "https://custom.example.com"}):
+        with patch.dict("os.environ", {"JIRA_TOKEN": "tok", "JIRA_EMAIL": "a@b.c", "JIRA_URL": "https://custom.example.com"}):
             get_jira_client(sample_cfg)
         mock_jira.assert_called_once_with(
             server="https://custom.example.com",
-            token_auth="tok",
+            basic_auth=("a@b.c", "tok"),
         )
 
 

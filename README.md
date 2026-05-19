@@ -45,7 +45,7 @@ uv sync --extra dev
 | Variable | Required | Description |
 |----------|----------|-------------|
 | `JIRA_TOKEN` | Yes | Jira API token |
-| `JIRA_EMAIL` | No | Email for basic auth (token auth used if absent) |
+| `JIRA_EMAIL` | Yes | Atlassian account email for basic auth |
 | `JIRA_URL` | No | Override Jira URL from config |
 | `LLM_MODEL` | No | Override LLM model (e.g. `gpt-4o`, `gemini/gemini-2.5-flash`) |
 | LLM provider key | Yes | e.g. `OPENAI_API_KEY`, `ANTHROPIC_API_KEY` — depends on model |

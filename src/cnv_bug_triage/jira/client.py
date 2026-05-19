@@ -73,9 +73,9 @@ def get_jira_client(cfg: AppConfig) -> JIRA:
     email = os.environ.get("JIRA_EMAIL", "")
     if not token:
         raise RuntimeError("JIRA_TOKEN environment variable is required")
-    if email:
-        return JIRA(server=url, basic_auth=(email, token))
-    return JIRA(server=url, token_auth=token)
+    if not email:
+        raise RuntimeError("JIRA_EMAIL environment variable is required")
+    return JIRA(server=url, basic_auth=(email, token))
 
 
 def build_bug_jql(cfg: AppConfig) -> str:
