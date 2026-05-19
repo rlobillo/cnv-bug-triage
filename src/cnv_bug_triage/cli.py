@@ -70,6 +70,18 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="Debug logging",
     )
+    parser.add_argument(
+        "--discover-team",
+        action="store_true",
+        help="Discover team members from resolved bugs and cache to .team_cache.yaml",
+    )
+    parser.add_argument(
+        "--discovery-days",
+        type=int,
+        default=180,
+        metavar="DAYS",
+        help="Lookback period for --discover-team (default: 180)",
+    )
 
     return parser
 
@@ -92,6 +104,15 @@ def main(argv: list[str] | None = None) -> None:
     except ConfigError as exc:
         print(f"Config error: {exc}", file=sys.stderr)
         sys.exit(1)
+
+    if args.discover_team:
+        from cnv_bug_triage.jira.client import get_jira_client
+        from cnv_bug_triage.team.discovery import discover_team, format_team_report
+
+        client = get_jira_client(cfg)
+        cache = discover_team(client, cfg, days=args.discovery_days)
+        print(format_team_report(cache))
+        return
 
     model = args.model or os.environ.get("LLM_MODEL") or cfg.llm.default_model
 

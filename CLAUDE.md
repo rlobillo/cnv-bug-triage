@@ -12,6 +12,8 @@ cnv-bug-triage is an LLM-assisted CLI tool that triages CNV (OpenShift Virtualiz
 - Run in report mode: `uv run cnv-bug-triage`
 - Run on a single bug: `uv run cnv-bug-triage --bug CNV-12345 -v`
 - Run without LLM: `uv run cnv-bug-triage --bug CNV-12345 --no-llm`
+- Discover team: `uv run cnv-bug-triage --discover-team`
+- Discover team (90 days): `uv run cnv-bug-triage --discover-team --discovery-days 90`
 - Post comments: `uv run cnv-bug-triage --apply`
 - Generate XLSX: `uv run cnv-bug-triage --output report.xlsx`
 - Override model: `uv run cnv-bug-triage --model anthropic/claude-sonnet-4-20250514`
@@ -42,6 +44,8 @@ src/cnv_bug_triage/
 │   └── duplicates.py    # detect_duplicates → DuplicateCandidate list
 ├── prompts/
 │   └── templates.py     # SYSTEM_PROMPT, TRIAGE_JSON_SCHEMA, build_triage_prompt
+├── team/
+│   └── discovery.py     # --discover-team: mine Jira history → team roster + cache
 ├── export/
 │   └── xlsx_report.py   # multi-sheet XLSX workbook
 └── schemas/
@@ -51,8 +55,9 @@ src/cnv_bug_triage/
 
 ## Key Data Flow
 
+0. `cli.py --discover-team` → `team/discovery.py` mines resolved bugs → `.team_cache.yaml`
 1. `cli.py` parses args → loads `AppConfig` from config.yaml
-2. `runner.run_triage()` orchestrates the pipeline
+2. `runner.run_triage()` orchestrates the pipeline (auto-loads team cache if `team.members` is empty)
 3. `jira/client.py` fetches bugs via JQL (configurable filters)
 4. `schemas/bug_doc.py` normalizes raw Jira issues into `BugDoc`
 5. `triage/checker.py` checks 5 triage fields → `TriageResult`

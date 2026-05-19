@@ -80,7 +80,19 @@ filters:
 
 ### Team Expertise Map
 
-The LLM uses this to suggest the right assignee and QA contact based on bug content:
+The LLM uses this to suggest the right assignee and QA contact based on bug content. You can populate it manually or use automatic discovery:
+
+```bash
+# Discover team from resolved bugs (last 180 days)
+cnv-bug-triage --discover-team
+
+# Custom lookback period
+cnv-bug-triage --discover-team --discovery-days 90
+```
+
+This queries Jira for resolved bugs matching your configured filters, extracts assignees and QA contacts, determines each person's role and expertise areas (from components, labels, and summary keywords), and caches the result to `.team_cache.yaml`. Normal triage runs auto-load this cache when `team.members` is empty in config.
+
+You can also configure the team manually in `config.yaml`:
 
 ```yaml
 team:
@@ -175,6 +187,12 @@ cnv-bug-triage -c /path/to/config.yaml
 
 # Debug logging
 cnv-bug-triage -v
+
+# Discover team from Jira history
+cnv-bug-triage --discover-team
+
+# Discover with shorter lookback
+cnv-bug-triage --discover-team --discovery-days 90
 ```
 
 ## Jira Comment Format
@@ -234,7 +252,7 @@ Update these sections in `config.yaml` each release/sprint cycle:
 - `planning.sprints` — add new sprints, remove completed ones
 - `planning.fix_versions` — update available versions
 - `releases.versions` — add new versions, update statuses (ga -> maintenance -> eol)
-- `team.members` — add/remove team members, update areas of expertise
+- `team.members` — add/remove team members, update areas of expertise (or re-run `--discover-team`)
 
 ## Project Structure
 
@@ -254,6 +272,8 @@ src/cnv_bug_triage/
 │   └── duplicates.py    # Duplicate detection
 ├── prompts/
 │   └── templates.py     # Prompt construction and JSON schemas
+├── team/
+│   └── discovery.py     # Team discovery from Jira history
 ├── export/
 │   └── xlsx_report.py   # Multi-sheet XLSX workbook
 └── schemas/

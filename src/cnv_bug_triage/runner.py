@@ -84,6 +84,22 @@ def run_triage(
 
     client = get_jira_client(cfg)
 
+    if not cfg.team.members:
+        from cnv_bug_triage.team.discovery import load_team_cache
+
+        cache = load_team_cache()
+        if cache and cache.members:
+            cfg.team.members = cache.members
+            logger.info(
+                "Loaded %d team members from cache (discovered %s)",
+                len(cache.members), cache.discovered_at,
+            )
+        else:
+            logger.warning(
+                "No team members configured and no cache found. "
+                "Run with --discover-team to populate.",
+            )
+
     if bug_keys:
         raw_issues = [fetch_bug(client, k) for k in bug_keys]
         jql_used = f"key IN ({', '.join(bug_keys)})"
